@@ -386,7 +386,9 @@ Param(
     [Parameter(Mandatory=$false,Position=27)]
         [String]$FFStagePath="Modules\FFStaging\",
     [Parameter(Mandatory=$false,Position=28)]
-        [String]$SafeWord="safeword"
+        [String]$SafeWord="safeword",
+    [Parameter(Mandatory=$false,Position=29)]
+        [Switch]$RunLocal
 )
 
 # First check to see if Kansa is already in use on the current  #
@@ -572,19 +574,25 @@ Param(
 function Load-AD {
     # no targets provided so we'll query AD to build it, need to load the AD module
     Write-Debug "Entering $($MyInvocation.MyCommand)"
-    if (Get-Module -ListAvailable | ? { $_.Name -match "ActiveDirectory" }) {
-        $Error.Clear()
-        Import-Module ActiveDirectory
-        if ($Error) {
+    if (-not $RunLocal) {
+        if (Get-Module -ListAvailable | ? { $_.Name -match "ActiveDirectory" }) {
+            $Error.Clear()
+            Import-Module ActiveDirectory
+            if ($Error) {
+                "ERROR: Could not load the required Active Directory module. Please install the Remote Server Administration Tool for AD. Quitting." | Add-Content -Encoding $Encoding $ErrorLog
+                $Error.Clear()
+                Exit
+            }
+        } else {
             "ERROR: Could not load the required Active Directory module. Please install the Remote Server Administration Tool for AD. Quitting." | Add-Content -Encoding $Encoding $ErrorLog
             $Error.Clear()
             Exit
         }
-    } else {
-        "ERROR: Could not load the required Active Directory module. Please install the Remote Server Administration Tool for AD. Quitting." | Add-Content -Encoding $Encoding $ErrorLog
-        $Error.Clear()
-        Exit
     }
+    else {
+        
+    }
+
     Write-Debug "Exiting $($MyInvocation.MyCommand)"
 }
 
@@ -746,12 +754,12 @@ function Get-TargetData {
 Runs each module against each target. Writes out the returned data to host where Kansa is run from.
 #>
 Param(
-    [Parameter(Mandatory=$True,Position=0)]
-        [Array]$Targets,
+    #[Parameter(Mandatory=$False,Position=0)]
+    #    [Array]$Targets,
     [Parameter(Mandatory=$True,Position=1)]
         [System.Collections.Specialized.OrderedDictionary]$Modules,
-    [Parameter(Mandatory=$False,Position=2)]
-        [System.Management.Automation.PSCredential]$Credential=$False,
+    #[Parameter(Mandatory=$False,Position=2)]
+    #    [System.Management.Automation.PSCredential]$Credential=$False,
     [Parameter(Mandatory=$False,Position=3)]
         [Int]$ThrottleLimit,
     [Parameter(Mandatory=$False,Position=4)]
@@ -760,21 +768,32 @@ Param(
     Write-Debug "Entering $($MyInvocation.MyCommand)"
     $Error.Clear()
 
+    if(-not $RunLocal -and -not $Targets) {
+        Throw "Targets not specified"
+    }
+    write-host "In Target Data"
+
     $myModuleName = $Modules.Keys | Select -First 1 | Select-Object -ExpandProperty BaseName
 
     # Create our sessions with targets
-    if ($Credential) {
-        if ($UseSSL) {
-            $PSSessions = New-PSSession -ComputerName $Targets -Port $Port -UseSSL -Authentication $Authentication -SessionOption (New-PSSessionOption -NoMachineProfile -OpenTimeout 1500 -OperationTimeout 5000 -CancelTimeout 5000) -Credential $Credential
+    if(-not $RunLocal) {
+        if ($Credential) {
+            if ($UseSSL) {
+                $PSSessions = New-PSSession -ComputerName $Targets -Port $Port -UseSSL -Authentication $Authentication -SessionOption (New-PSSessionOption -NoMachineProfile -OpenTimeout 1500 -OperationTimeout 5000 -CancelTimeout 5000) -Credential $Credential
+            } else {
+                $PSSessions = New-PSSession -ComputerName $Targets -Port $Port -Authentication $Authentication -SessionOption (New-PSSessionOption -NoMachineProfile -OpenTimeout 1500 -OperationTimeout 5000 -CancelTimeout 5000) -Credential $Credential
+            }
         } else {
-            $PSSessions = New-PSSession -ComputerName $Targets -Port $Port -Authentication $Authentication -SessionOption (New-PSSessionOption -NoMachineProfile -OpenTimeout 1500 -OperationTimeout 5000 -CancelTimeout 5000) -Credential $Credential
+            if ($UseSSL) {
+                $PSSessions = New-PSSession -ComputerName $Targets -Port $Port -UseSSL -Authentication $Authentication -SessionOption (New-PSSessionOption -NoMachineProfile -OpenTimeout 1500 -OperationTimeout 5000 -CancelTimeout 5000)
+            } else {
+                $PSSessions = New-PSSession -ComputerName $Targets -Port $Port -Authentication $Authentication -SessionOption (New-PSSessionOption -NoMachineProfile -OpenTimeout 1500 -OperationTimeout 5000 -CancelTimeout 5000)
+            }
         }
-    } else {
-        if ($UseSSL) {
-            $PSSessions = New-PSSession -ComputerName $Targets -Port $Port -UseSSL -Authentication $Authentication -SessionOption (New-PSSessionOption -NoMachineProfile -OpenTimeout 1500 -OperationTimeout 5000 -CancelTimeout 5000)
-        } else {
-            $PSSessions = New-PSSession -ComputerName $Targets -Port $Port -Authentication $Authentication -SessionOption (New-PSSessionOption -NoMachineProfile -OpenTimeout 1500 -OperationTimeout 5000 -CancelTimeout 5000)
-        }
+    }
+    else {
+        write-host "Created Local PSSEssion"
+        $PSSessions = $True
     }
 
     # Check for and log errors
@@ -784,7 +803,7 @@ Param(
     }
 
     if ($PSSessions) {
-
+        Write-host "In PS Sessions"
         $Modules.Keys | Foreach-Object { $Module = $_
             $ModuleName  = $Module | Select-Object -ExpandProperty BaseName
             $Arguments   = @()
@@ -822,12 +841,26 @@ Param(
             
             # run the module on the targets            
             if ($Arguments) {
+                
                 Write-Debug "Invoke-Command -Session $PSSessions -FilePath $Module -ArgumentList `"$Arguments`" -AsJob -ThrottleLimit $ThrottleLimit"
-                $Job = Invoke-Command -Session $PSSessions -FilePath $Module -ArgumentList $Arguments -AsJob -ThrottleLimit $ThrottleLimit
+                if($RunLocal) {
+                    Start-Job -FilePath $Module -ArgumentList $Arguments
+                }
+                else {
+                    $Job = Invoke-Command -Session $PSSessions -FilePath $Module -ArgumentList $Arguments -AsJob -ThrottleLimit $ThrottleLimit
+                }
+                
                 Write-Verbose "Waiting for $ModuleName $Arguments to complete.`n"
             } else {
                 Write-Debug "Invoke-Command -Session $PSSessions -FilePath $Module -AsJob -ThrottleLimit $ThrottleLimit"
-                $Job = Invoke-Command -Session $PSSessions -FilePath $Module -AsJob -ThrottleLimit $ThrottleLimit                
+                Write-Debug "LocalRun = $RunLocal"
+                if($RunLocal) {
+                    Write-Debug "Invoke-Command -FilePath $Module -AsJob"
+                    $Job = Start-Job -FilePath $Module               
+                }
+                else {
+                    $Job = Invoke-Command -Session $PSSessions -FilePath $Module -AsJob -ThrottleLimit $ThrottleLimit                
+                }
                 Write-Verbose "Waiting for $ModuleName to complete.`n"
             }
             # Wait-Job does return data to stdout, add $suppress = to start of next line, if needed
@@ -1899,15 +1932,20 @@ if ($ListAnalysis) {
 }
 
 # Get our targets. #
-if ($TargetList) {
-    [System.Collections.ArrayList]$Targets = Get-Targets -TargetList $TargetList -TargetCount $TargetCount
-} elseif ($Target) {
+if(-not $RunLocal) {
+    if ($TargetList) {
+        [System.Collections.ArrayList]$Targets = Get-Targets -TargetList $TargetList -TargetCount $TargetCount
+    } elseif ($Target) {
+        $Targets = New-Object System.Collections.ArrayList
+        [void]$Targets.Add($Target)
+    } else {
+        Write-Verbose "No Targets specified. Building one requires RAST and will take some time."
+        [void] (Load-AD)
+        [System.Collections.ArrayList]$Targets  = Get-Targets -TargetCount $TargetCount
+    }
+}
+else {
     $Targets = New-Object System.Collections.ArrayList
-    [void]$Targets.Add($Target)
-} else {
-    Write-Verbose "No Targets specified. Building one requires RAST and will take some time."
-    [void] (Load-AD)
-    [System.Collections.ArrayList]$Targets  = Get-Targets -TargetCount $TargetCount
 }
 
 # Was ElkAlert specified? #
@@ -1937,32 +1975,42 @@ if ($OutputFormat -eq "csv" -or $OutputFormat -eq "json" -or $OutputFormat -eq "
     $index = 0
     $buffer = $ThrottleLimit
 
-    Do{
-        if (($index + $buffer) -lt $Targets.Count){
-            $percentComplete = $index/$Targets.Count
-            $percentComplete = "{0:P1}" -f $percentComplete
-            Write-Verbose "Running module on machines $index to $($index + $buffer-1) of $($Targets.Count) ($percentComplete)`n"
-            $buffTargets = $Targets[$index..($index + $buffer-1)]
-        }
-        else{
-            $percentComplete = $index/$Targets.Count
-            $percentComplete = "{0:P1}" -f $percentComplete
-            $diff = ($Targets.Count - $index)
-            Write-Verbose "Running module on machines $index to $($index + $diff) of $($Targets.Count) ($percentComplete)`n"
-            $buffTargets = $Targets[$index..($index + $diff-1)]
-        }
-        Get-TargetData -Targets $buffTargets -Modules $Modules -Credential $Credential -ThrottleLimit $ThrottleLimit
-    # Done gathering data. #
+    if(-not $RunLocal) {
+        Do{
+            if (($index + $buffer) -lt $Targets.Count){
+                $percentComplete = $index/$Targets.Count
+                $percentComplete = "{0:P1}" -f $percentComplete
+                Write-Verbose "Running module on machines $index to $($index + $buffer-1) of $($Targets.Count) ($percentComplete)`n"
+                $buffTargets = $Targets[$index..($index + $buffer-1)]
+            }
+            else{
+                $percentComplete = $index/$Targets.Count
+                $percentComplete = "{0:P1}" -f $percentComplete
+                $diff = ($Targets.Count - $index)
+                Write-Verbose "Running module on machines $index to $($index + $diff) of $($Targets.Count) ($percentComplete)`n"
+                $buffTargets = $Targets[$index..($index + $diff-1)]
+            }
+            Get-TargetData -Targets $buffTargets -Modules $Modules -Credential $Credential -ThrottleLimit $ThrottleLimit
+        # Done gathering data. #
 
-    # Are we running analysis scripts? #
-    if ($Analysis) {
-        Get-Analysis $OutputPath $StartingPath
-    }
-    # Done running analysis #
+        # Are we running analysis scripts? #
+        if ($Analysis) {
+            Get-Analysis $OutputPath $StartingPath
+        }
+        # Done running analysis #
 
-    $index = $index + $buffer
+        $index = $index + $buffer
+        }
+        While($index -lt $Targets.Count)
     }
-    While($index -lt $Targets.Count)
+    else {
+        Write-host "About to run TargetData"
+        Get-TargetData -Modules $Modules
+        
+        if ($Analysis) {
+            Get-Analysis $OutputPath $StartingPath
+        }
+    }
 }
 # However, if you are using a special logging config, you need to send it off to Get-TargetData
 elseif ($OutputFormat -eq "gl" -or $OutputFormat -eq "splunk") {
